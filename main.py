@@ -5,9 +5,11 @@ import requests
 import json
 import time
 import re
+import random
 from datetime import datetime
 from dotenv import load_dotenv
 from apscheduler.schedulers.blocking import BlockingScheduler
+from threading import Thread
 
 # Load environment variables
 load_dotenv()
@@ -61,98 +63,131 @@ def get_updates(offset=None):
         print(f"Error getting updates: {e}")
         return []
 
-def get_current_price(platform, url):
-    """Dapatkan harga saat ini dari produk"""
+import random
+
+# Global session untuk reuse connection
+requests_session = requests.Session()
+
+def scrape_harga(url):
+    """Coba scrape harga dari URL dengan improved strategy"""
     try:
+        # Real browser headers yang lebih lengkap
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'User-Agent': random.choice([
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            ]),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Accept-Encoding': 'gzip, deflate, br',
             'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Cache-Control': 'max-age=0',
             'Referer': 'https://www.google.com/',
+            'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120"',
+            'Sec-Ch-Ua-Mobile': '?0',
+            'Sec-Ch-Ua-Platform': '"Windows"',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Upgrade-Insecure-Requests': '1',
         }
         
-        response = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
+        # Random delay untuk mimick human browsing (2-5 detik)
+        time.sleep(random.uniform(2, 5))
+        
+        print(f"[SCRAPING] {url[:60]}...")
+        
+        # Gunakan session untuk reuse connection
+        response = requests_session.get(
+            url,
+            headers=headers,
+            timeout=15,
+            allow_redirects=True
+        )
+        
+        # Check status code
+        if response.status_code == 403:
+            print(f"[ERROR] 403 Forbidden - Website block request")
+            return None
+        elif response.status_code == 429:
+            print(f"[ERROR] 429 Too Many Requests - Rate limited")
+            return None
+        elif response.status_code != 200:
+            print(f"[ERROR] HTTP {response.status_code}")
+            return None
+        
         response.raise_for_status()
-        
         html = response.text
-        print(f"[DEBUG] Scraping {platform}, HTML length: {len(html)}")
         
-        # Tokopedia patterns
-        if 'tokopedia' in url.lower():
-            # Pattern 1: Rp dengan titik
-            match = re.search(r'Rp([\d.]+)', html)
-            if match:
-                price = int(match.group(1).replace('.', ''))
-                if price > 0:
-                    print(f"[SUCCESS] Found price: {price}")
-                    return price
-            
-            # Pattern 2: Price dalam JSON
-            match = re.search(r'"price":(\d+)', html)
-            if match:
-                price = int(match.group(1))
-                if price > 0:
-                    print(f"[SUCCESS] Found price (JSON): {price}")
-                    return price
-            
-            # Pattern 3: finalPrice
-            match = re.search(r'"finalPrice":(\d+)', html)
-            if match:
-                price = int(match.group(1))
-                if price > 0:
-                    print(f"[SUCCESS] Found finalPrice: {price}")
-                    return price
+        print(f"[DEBUG] Got {len(html)} bytes")
         
-        # Shopee patterns
-        elif 'shopee' in url.lower():
-            # Pattern 1: price dalam JSON
-            match = re.search(r'"price":(\d+)', html)
-            if match:
-                price = int(match.group(1))
-                if price > 10000:  # Shopee harga minimal
-                    print(f"[SUCCESS] Found Shopee price: {price}")
-                    return price
-            
-            # Pattern 2: Rp format
-            match = re.search(r'Rp([\d.]+)', html)
-            if match:
-                price = int(match.group(1).replace('.', ''))
-                if price > 10000:
-                    print(f"[SUCCESS] Found Shopee price (Rp): {price}")
-                    return price
+        # Tokopedia - cari berbagai pattern
+        patterns = [
+            r'Rp[\s]*([0-9.]+)',  # Rp 1.000.000
+            r'"price":(\d+)',      # "price":1000000
+            r'"finalPrice":(\d+)', # "finalPrice":1000000
+            r'"originalPrice":(\d+)',  # original price
+            r'Rp\s*(\d+(?:\.\d+)*)',  # Alternative Rp format
+        ]
         
-        print(f"[ERROR] No price pattern matched for {platform}")
-        print(f"[DEBUG] Sample HTML: {html[:500]}")
+        for pattern in patterns:
+            matches = re.finditer(pattern, html, re.IGNORECASE)
+            for match in matches:
+                price_str = match.group(1)
+                try:
+                    # Remove dots and convert
+                    price = int(price_str.replace('.', '').replace(',', ''))
+                    if price > 1000 and price < 1000000000:  # Sanity check
+                        print(f"[SUCCESS] Found price: Rp {price:,}")
+                        return price
+                except:
+                    continue
+        
+        print(f"[WARNING] Could not find valid price pattern")
         return None
         
     except requests.exceptions.Timeout:
-        print(f"[ERROR] Timeout scraping {platform}")
+        print(f"[ERROR] Timeout (15s) - Website slow or blocked")
         return None
     except requests.exceptions.ConnectionError:
-        print(f"[ERROR] Connection error {platform}")
+        print(f"[ERROR] Connection error")
         return None
     except Exception as e:
-        print(f"[ERROR] Error scraping {platform}: {e}")
+        print(f"[ERROR] {str(e)}")
         return None
 
 def format_price(price):
     """Format harga ke Rp"""
-    return f"Rp{price:,.0f}".replace(',', '.')
+    if isinstance(price, int):
+        return f"Rp{price:,.0f}".replace(',', '.')
+    return str(price)
 
 def check_prices_job():
     """Job untuk cek harga otomatis"""
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Checking prices...")
+    print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] AUTO-CHECK HARGA")
     products = load_products()
+    
+    if not products:
+        return
     
     for product in products:
         try:
-            price = get_current_price(product['platform'], product['url'])
+            # Skip jika harga manual (user set sendiri)
+            if product.get('manual_price'):
+                continue
+            
+            price = scrape_harga(product['url'])
             if price is None:
+                print(f"  ⚠️ {product['name']} - Gagal scrape")
                 continue
             
             product['current_price'] = price
             product['last_checked'] = datetime.now().isoformat()
             
+            print(f"  ✓ {product['name']} - Rp {price:,}")
+            
+            # Alert jika harga target tercapai
             if price <= product['target_price']:
                 message = f"""🎉 <b>HARGA TARGET TERCAPAI!</b>
 
@@ -166,13 +201,13 @@ def check_prices_job():
             
             time.sleep(1)
         except Exception as e:
-            print(f"Error checking {product.get('name')}: {e}")
+            print(f"  ❌ Error checking {product.get('name')}: {e}")
     
     save_products(products)
 
 def handle_command(text, update_id):
     """Handle perintah dari user"""
-    parts = text.split(None, 3)
+    parts = text.split(None, 4)
     command = parts[0]
     
     if command == '/start':
@@ -194,6 +229,9 @@ Ketik /help untuk detail"""
 <b>1️⃣ Tambah Produk:</b>
 <code>/add_product Tokopedia https://tokopedia.com/... 150000</code>
 
+<b>Format:</b>
+/add_product [Platform] [URL] [Target_Harga]
+
 <b>2️⃣ Lihat Produk:</b>
 <code>/list_products</code>
 
@@ -201,55 +239,155 @@ Ketik /help untuk detail"""
 <code>/remove_product 1</code>
 
 <b>4️⃣ Cek Harga Sekarang:</b>
-<code>/check_now</code>"""
+<code>/check_now</code>
+
+<b>⚠️ Tips:</b>
+- URL harus dari address bar (bukan link share)
+- Harga target dalam Rupiah (angka saja)
+- Bot cek otomatis setiap jam"""
         send_telegram_message(message)
     
     elif command == '/add_product':
         if len(parts) < 4:
-            send_telegram_message("❌ Format: /add_product [Platform] [URL] [Harga]")
+            send_telegram_message("❌ Format: /add_product [Platform] [URL] [Harga]\n\nContoh: /add_product Tokopedia https://tokopedia.com/toko/produk 5000000")
             return
         
         platform, url, target = parts[1], parts[2], parts[3]
         
         if platform.lower() not in ['tokopedia', 'shopee']:
-            send_telegram_message("❌ Platform harus Tokopedia atau Shopee")
+            send_telegram_message("❌ Platform harus: Tokopedia atau Shopee")
             return
         
         try:
             target_price = int(target)
+            if target_price <= 0:
+                raise ValueError()
         except:
-            send_telegram_message("❌ Harga harus angka")
+            send_telegram_message("❌ Harga harus angka positif")
             return
         
-        send_telegram_message("⏳ Cek harga...")
-        current_price = get_current_price(platform, url)
+        if not url.startswith('http'):
+            send_telegram_message("❌ URL harus dimulai dengan http:// atau https://")
+            return
+        
+        send_telegram_message("⏳ Sedang cek harga dari website...")
+        current_price = scrape_harga(url)
         
         if current_price is None:
-            send_telegram_message("❌ Tidak bisa cek harga. Cek URL!")
+            send_telegram_message("""❌ <b>Gagal ambil harga dari website</b>
+
+Kemungkinan:
+1️⃣ Website memblokir bot (anti-scraping)
+2️⃣ URL tidak valid atau produk sudah dihapus
+3️⃣ Harga di-load via JavaScript (bot tidak bisa)
+
+<b>Solusi:</b>
+- Tunggu 15 menit dan coba lagi
+- Pastikan URL dari address bar (bukan link share)
+- Coba produk lain
+
+Atau gunakan: /add_manual [Platform] [Nama] [Harga_Saat_Ini] [Target]""")
             return
         
         products = load_products()
-        products.append({
+        product_name = url.split('/')[-1][:50] if url.split('/')[-1] else 'Produk'
+        
+        new_product = {
             'id': len(products) + 1,
-            'name': url.split('/')[-1][:50],
+            'name': product_name,
             'platform': platform,
             'url': url,
             'target_price': target_price,
             'current_price': current_price,
             'added_date': datetime.now().isoformat(),
-            'last_checked': datetime.now().isoformat()
-        })
+            'last_checked': datetime.now().isoformat(),
+            'manual_price': False
+        }
+        products.append(new_product)
         save_products(products)
         
         message = f"""✅ <b>Produk Ditambahkan!</b>
 
-📦 Nama: {products[-1]['name']}
+📦 Nama: {product_name}
 🏪 Platform: {platform}
 💰 Harga Sekarang: {format_price(current_price)}
-🎯 Target: {format_price(target_price)}
+🎯 Target Harga: {format_price(target_price)}
 
-Bot akan cek harga setiap jam!"""
+Bot akan cek harga otomatis setiap jam!
+Notifikasi akan dikirim saat harga turun ke target."""
         send_telegram_message(message)
+    
+    elif command == '/add_manual':
+        if len(parts) < 5:
+            send_telegram_message("❌ Format: /add_manual [Platform] [Nama] [Harga_Sekarang] [Target]\n\nContoh: /add_manual Tokopedia iPhone 5000000 4500000")
+            return
+        
+        platform, name, current, target = parts[1], parts[2], parts[3], parts[4]
+        
+        try:
+            current_price = int(current)
+            target_price = int(target)
+        except:
+            send_telegram_message("❌ Harga harus angka")
+            return
+        
+        products = load_products()
+        new_product = {
+            'id': len(products) + 1,
+            'name': name,
+            'platform': platform,
+            'url': '',
+            'target_price': target_price,
+            'current_price': current_price,
+            'added_date': datetime.now().isoformat(),
+            'last_checked': datetime.now().isoformat(),
+            'manual_price': True
+        }
+        products.append(new_product)
+        save_products(products)
+        
+        message = f"""✅ <b>Produk Manual Ditambahkan!</b>
+
+📦 Nama: {name}
+🏪 Platform: {platform}
+💰 Harga Sekarang: {format_price(current_price)}
+🎯 Target Harga: {format_price(target_price)}
+
+⚠️ Mode Manual - Anda harus update harga dengan:
+/update_price [ID] [Harga_Baru]"""
+        send_telegram_message(message)
+    
+    elif command == '/update_price':
+        if len(parts) < 3:
+            send_telegram_message("❌ Format: /update_price [ID] [Harga_Baru]")
+            return
+        
+        try:
+            product_id = int(parts[1])
+            new_price = int(parts[2])
+            
+            products = load_products()
+            for p in products:
+                if p['id'] == product_id:
+                    p['current_price'] = new_price
+                    p['last_checked'] = datetime.now().isoformat()
+                    
+                    if new_price <= p['target_price']:
+                        message = f"""🎉 <b>HARGA TARGET TERCAPAI!</b>
+
+📦 Produk: {p['name']}
+🏪 Platform: {p['platform']}
+💰 Harga: <b>{format_price(new_price)}</b>
+🎯 Target: {format_price(p['target_price'])}"""
+                        send_telegram_message(message)
+                    
+                    save_products(products)
+                    send_telegram_message(f"✅ Harga {p['name']} diupdate menjadi {format_price(new_price)}")
+                    return
+            
+            send_telegram_message(f"❌ Produk #{product_id} tidak ditemukan")
+        except:
+            send_telegram_message("❌ Format tidak valid")
     
     elif command == '/list_products':
         products = load_products()
@@ -261,7 +399,11 @@ Bot akan cek harga setiap jam!"""
         for p in products:
             current = format_price(p.get('current_price', 0))
             target = format_price(p.get('target_price', 0))
-            message += f"<b>{p['id']}. {p['name']}</b>\n   Platform: {p['platform']}\n   Harga: {current}\n   Target: {target}\n\n"
+            manual = " (Manual)" if p.get('manual_price') else ""
+            message += f"<b>{p['id']}. {p['name']}</b>{manual}\n"
+            message += f"   Platform: {p['platform']}\n"
+            message += f"   Harga: {current}\n"
+            message += f"   Target: {target}\n\n"
         
         send_telegram_message(message)
     
@@ -280,13 +422,16 @@ Bot akan cek harga setiap jam!"""
             send_telegram_message("❌ Nomor produk tidak valid")
     
     elif command == '/check_now':
-        send_telegram_message("⏳ Cek harga...")
+        send_telegram_message("⏳ Sedang cek harga semua produk...")
         products = load_products()
         alert_count = 0
         
         for product in products:
+            if product.get('manual_price'):
+                continue
+            
             try:
-                price = get_current_price(product['platform'], product['url'])
+                price = scrape_harga(product['url'])
                 if price is None:
                     continue
                 
@@ -309,22 +454,18 @@ Bot akan cek harga setiap jam!"""
                 pass
         
         save_products(products)
-        if alert_count > 0:
-            send_telegram_message(f"✅ {alert_count} produk mencapai target!")
-        else:
-            send_telegram_message("✅ Selesai. Tidak ada produk yang mencapai target")
+        send_telegram_message(f"✅ Pengecekan selesai. {alert_count} produk mencapai target.")
 
 def main():
     """Main bot loop"""
     print("🤖 Bot started!")
-    print("Polling updates from Telegram...")
+    print("Polling updates from Telegram...\n")
     
     # Setup scheduler untuk cek harga setiap jam
     scheduler = BlockingScheduler()
-    scheduler.add_job(check_prices_job, 'interval', hours=1)
+    scheduler.add_job(check_prices_job, 'interval', hours=1, id='price_check')
     
     # Jalankan scheduler di background thread
-    from threading import Thread
     scheduler_thread = Thread(target=scheduler.start, daemon=True)
     scheduler_thread.start()
     
@@ -342,6 +483,7 @@ def main():
                 text = message.get('text', '')
                 
                 if text and text.startswith('/'):
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] Command: {text[:50]}")
                     handle_command(text, update_id)
             
             time.sleep(1)
