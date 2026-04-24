@@ -65,24 +65,74 @@ def get_current_price(platform, url):
     """Dapatkan harga saat ini dari produk"""
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Referer': 'https://www.google.com/',
         }
-        response = requests.get(url, headers=headers, timeout=10)
         
-        # Cari harga dalam format Rp (Tokopedia)
-        match = re.search(r'Rp([\d.]+)', response.text)
-        if match:
-            price = int(match.group(1).replace('.', ''))
-            return price
+        response = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
+        response.raise_for_status()
         
-        # Cari harga Shopee
-        match = re.search(r'"price":(\d+)', response.text)
-        if match:
-            return int(match.group(1))
+        html = response.text
+        print(f"[DEBUG] Scraping {platform}, HTML length: {len(html)}")
         
+        # Tokopedia patterns
+        if 'tokopedia' in url.lower():
+            # Pattern 1: Rp dengan titik
+            match = re.search(r'Rp([\d.]+)', html)
+            if match:
+                price = int(match.group(1).replace('.', ''))
+                if price > 0:
+                    print(f"[SUCCESS] Found price: {price}")
+                    return price
+            
+            # Pattern 2: Price dalam JSON
+            match = re.search(r'"price":(\d+)', html)
+            if match:
+                price = int(match.group(1))
+                if price > 0:
+                    print(f"[SUCCESS] Found price (JSON): {price}")
+                    return price
+            
+            # Pattern 3: finalPrice
+            match = re.search(r'"finalPrice":(\d+)', html)
+            if match:
+                price = int(match.group(1))
+                if price > 0:
+                    print(f"[SUCCESS] Found finalPrice: {price}")
+                    return price
+        
+        # Shopee patterns
+        elif 'shopee' in url.lower():
+            # Pattern 1: price dalam JSON
+            match = re.search(r'"price":(\d+)', html)
+            if match:
+                price = int(match.group(1))
+                if price > 10000:  # Shopee harga minimal
+                    print(f"[SUCCESS] Found Shopee price: {price}")
+                    return price
+            
+            # Pattern 2: Rp format
+            match = re.search(r'Rp([\d.]+)', html)
+            if match:
+                price = int(match.group(1).replace('.', ''))
+                if price > 10000:
+                    print(f"[SUCCESS] Found Shopee price (Rp): {price}")
+                    return price
+        
+        print(f"[ERROR] No price pattern matched for {platform}")
+        print(f"[DEBUG] Sample HTML: {html[:500]}")
+        return None
+        
+    except requests.exceptions.Timeout:
+        print(f"[ERROR] Timeout scraping {platform}")
+        return None
+    except requests.exceptions.ConnectionError:
+        print(f"[ERROR] Connection error {platform}")
         return None
     except Exception as e:
-        print(f"Error scraping {platform}: {e}")
+        print(f"[ERROR] Error scraping {platform}: {e}")
         return None
 
 def format_price(price):
