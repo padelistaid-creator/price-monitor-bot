@@ -1,7 +1,9 @@
+#!/usr/bin/env python3
+
 import os
 import logging
-from telegram.ext import Application, CommandHandler, ContextTypes
 from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 from dotenv import load_dotenv
 import requests
 import json
@@ -27,14 +29,20 @@ PRODUCTS_FILE = 'products.json'
 def load_products():
     """Load daftar produk dari file"""
     if os.path.exists(PRODUCTS_FILE):
-        with open(PRODUCTS_FILE, 'r') as f:
-            return json.load(f)
+        try:
+            with open(PRODUCTS_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            return []
     return []
 
 def save_products(products):
     """Simpan daftar produk ke file"""
-    with open(PRODUCTS_FILE, 'w') as f:
-        json.dump(products, f, indent=2)
+    try:
+        with open(PRODUCTS_FILE, 'w') as f:
+            json.dump(products, f, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving products: {e}")
 
 def get_current_price(platform, url):
     """Dapatkan harga saat ini dari produk"""
@@ -61,6 +69,13 @@ def get_current_price(platform, url):
     except Exception as e:
         logger.error(f"Error scraping {platform}: {e}")
         return None
+
+async def send_message(application: Application, message: str):
+    """Kirim pesan ke user"""
+    try:
+        await application.bot.send_message(chat_id=CHAT_ID, text=message, parse_mode='HTML')
+    except Exception as e:
+        logger.error(f"Error sending message: {e}")
 
 # ============ COMMAND HANDLERS ============
 
@@ -104,13 +119,10 @@ Format: /add_product [Platform] [URL] [Target Harga]
 <b>4️⃣ Cek Harga Sekarang:</b>
 <code>/check_now</code>
 
-<b>⏰ Otomatis Cek Harga Setiap Jam</b>
-
-Bot akan otomatis cek harga setiap jam. Jika harga mencapai target, Anda akan mendapat notifikasi.
-
 <b>💡 Tips:</b>
 - Gunakan URL produk yang lengkap
 - Harga target sebaiknya 10-20% di bawah harga saat ini
+- Gunakan /check_now untuk cek harga kapan saja
 """
     await update.message.reply_text(message, parse_mode='HTML')
 
@@ -177,7 +189,7 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
 💰 Harga Sekarang: {current_formatted}
 🎯 Target Harga: {target_formatted}
 
-Bot akan cek harga setiap jam. Anda akan mendapat notifikasi jika harga mencapai target.
+Gunakan /check_now untuk cek harga kapan saja.
 """
         await update.message.reply_text(message, parse_mode='HTML')
         
@@ -243,34 +255,28 @@ async def remove_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Terjadi kesalahan: {str(e)}")
 
 async def check_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Perintah /check_now"""
-    await update.message.reply_text("⏳ Sedang cek harga semua produk...")
-    await check_prices(context)
-    await update.message.reply_text("✅ Pengecekan selesai.")
-
-async def send_notification(app: Application, message: str):
-    """Kirim notifikasi ke Telegram"""
-    try:
-        await app.bot.send_message(chat_id=CHAT_ID, text=message, parse_mode='HTML')
-    except Exception as e:
-        logger.error(f"Error sending notification: {e}")
-
-async def check_prices(context: ContextTypes.DEFAULT_TYPE):
-    """Fungsi untuk cek harga secara berkala"""
+    """Perintah /check_now - Cek harga semua produk sekarang"""
     products = load_products()
-    app = context.application
     
-    for i, product in enumerate(products):
+    if not products:
+        await update.message.reply_text("📭 Belum ada produk untuk dicek.")
+        return
+    
+    await update.message.reply_text("⏳ Sedang cek harga semua produk...")
+    
+    alert_count = 0
+    
+    for product in products:
         try:
             current_price = get_current_price(product['platform'], product['url'])
             
             if current_price is None:
-                logger.warning(f"Could not get price for product {i+1}")
                 continue
             
             product['current_price'] = current_price
             product['last_checked'] = datetime.now().isoformat()
             
+            # Jika harga mencapai target, kirim notifikasi
             if current_price <= product['target_price']:
                 price_formatted = f"Rp{current_price:,.0f}".replace(',', '.')
                 target_formatted = f"Rp{product['target_price']:,.0f}".replace(',', '.')
@@ -285,18 +291,23 @@ async def check_prices(context: ContextTypes.DEFAULT_TYPE):
 
 <a href="{product['url']}">Beli Sekarang</a>
 """
-                await send_notification(app, message)
+                await send_message(context.application, message)
+                alert_count += 1
             
-            save_products(products)
+            time.sleep(1)  # Rate limiting
             
         except Exception as e:
-            logger.error(f"Error checking product {i+1}: {e}")
-        
-        time.sleep(1)
+            logger.error(f"Error checking product {product['name']}: {e}")
+    
+    save_products(products)
+    
+    if alert_count > 0:
+        await update.message.reply_text(f"✅ Pengecekan selesai! {alert_count} produk mencapai target harga.")
+    else:
+        await update.message.reply_text("✅ Pengecekan selesai. Tidak ada produk yang mencapai target harga.")
 
 async def main():
     """Jalankan bot"""
-    # Create application
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     
     # Add handlers
@@ -307,18 +318,10 @@ async def main():
     application.add_handler(CommandHandler("remove_product", remove_product))
     application.add_handler(CommandHandler("check_now", check_now))
     
-    # Set job untuk cek harga setiap jam
-    job_queue = application.job_queue
-    job_queue.run_repeating(check_prices, interval=3600, first=60)
-    
     logger.info("Bot started successfully!")
     
-    # Start polling
     async with application:
-        await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-        await application.start()
-        logger.info("Bot is running and polling for updates...")
-        await application.updater.stop()
+        await application.run_polling()
 
 if __name__ == '__main__':
     import asyncio
