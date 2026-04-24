@@ -1,7 +1,7 @@
 import os
 import logging
-from telegram import Bot
 from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update
 from dotenv import load_dotenv
 import requests
 import json
@@ -36,8 +36,8 @@ def save_products(products):
     with open(PRODUCTS_FILE, 'w') as f:
         json.dump(products, f, indent=2)
 
-def extract_tokopedia_price(url):
-    """Ekstrak harga dari URL Tokopedia"""
+def get_current_price(platform, url):
+    """Dapatkan harga saat ini dari produk"""
     try:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
@@ -45,97 +45,26 @@ def extract_tokopedia_price(url):
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         
-        # Cari harga dalam format currency Indonesia (Rp)
+        # Cari harga dalam format Rp (untuk Tokopedia)
         match = re.search(r'Rp([\d.]+)', response.text)
         if match:
             price = int(match.group(1).replace('.', ''))
             return price
         
-        return None
-    except Exception as e:
-        logger.error(f"Error scraping Tokopedia: {e}")
-        return None
-
-def extract_shopee_price(url):
-    """Ekstrak harga dari URL Shopee"""
-    try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        
-        # Cari harga dalam JSON schema atau attribute
-        match = re.search(r'"price":"?(\d+)"?', response.text)
+        # Cari harga tanpa Rp (untuk Shopee)
+        match = re.search(r'"price":(\d+)', response.text)
         if match:
             price = int(match.group(1))
             return price
         
         return None
     except Exception as e:
-        logger.error(f"Error scraping Shopee: {e}")
+        logger.error(f"Error scraping {platform}: {e}")
         return None
-
-def get_current_price(platform, url):
-    """Dapatkan harga saat ini dari produk"""
-    if 'tokopedia' in url.lower():
-        return extract_tokopedia_price(url)
-    elif 'shopee' in url.lower():
-        return extract_shopee_price(url)
-    return None
-
-async def send_notification(context, message):
-    """Kirim notifikasi ke Telegram"""
-    try:
-        await context.bot.send_message(chat_id=CHAT_ID, text=message, parse_mode='HTML')
-    except Exception as e:
-        logger.error(f"Error sending notification: {e}")
-
-async def check_prices(context: ContextTypes.DEFAULT_TYPE):
-    """Fungsi untuk cek harga secara berkala (dipanggil setiap jam)"""
-    products = load_products()
-    
-    for i, product in enumerate(products):
-        try:
-            current_price = get_current_price(product['platform'], product['url'])
-            
-            if current_price is None:
-                logger.warning(f"Could not get price for product {i+1}")
-                continue
-            
-            # Simpan harga sebelumnya
-            old_price = product.get('current_price')
-            product['current_price'] = current_price
-            product['last_checked'] = datetime.now().isoformat()
-            
-            # Cek apakah harga sudah mencapai target
-            if current_price <= product['target_price']:
-                price_formatted = f"Rp{current_price:,.0f}".replace(',', '.')
-                target_formatted = f"Rp{product['target_price']:,.0f}".replace(',', '.')
-                
-                message = f"""
-🎉 <b>HARGA TARGET TERCAPAI!</b>
-
-📦 Produk: {product['name']}
-🏪 Platform: {product['platform']}
-💰 Harga Sekarang: <b>{price_formatted}</b>
-🎯 Target Harga: {target_formatted}
-
-<a href="{product['url']}">Beli Sekarang</a>
-"""
-                await send_notification(context, message)
-            
-            # Simpan update
-            save_products(products)
-            
-        except Exception as e:
-            logger.error(f"Error checking product {i+1}: {e}")
-        
-        time.sleep(2)  # Delay untuk avoid rate limiting
 
 # ============ COMMAND HANDLERS ============
 
-async def start(update, context):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Perintah /start"""
     message = """
 👋 Selamat datang di <b>Price Monitor Bot</b>!
@@ -153,7 +82,7 @@ Ketik /help untuk instruksi lebih detail.
 """
     await update.message.reply_text(message, parse_mode='HTML')
 
-async def help_command(update, context):
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Perintah /help"""
     message = """
 <b>📖 Panduan Penggunaan</b>
@@ -182,14 +111,12 @@ Bot akan otomatis cek harga setiap jam. Jika harga mencapai target, Anda akan me
 <b>💡 Tips:</b>
 - Gunakan URL produk yang lengkap
 - Harga target sebaiknya 10-20% di bawah harga saat ini
-- Bot butuh beberapa menit pertama untuk cek harga awal
 """
     await update.message.reply_text(message, parse_mode='HTML')
 
-async def add_product(update, context):
+async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Perintah /add_product"""
     try:
-        # Parse perintah: /add_product Tokopedia https://... 150000
         args = update.message.text.split(None, 3)
         
         if len(args) < 4:
@@ -205,17 +132,14 @@ async def add_product(update, context):
         url = args[2]
         target_price = int(args[3])
         
-        # Validasi platform
         if platform.lower() not in ['tokopedia', 'shopee']:
             await update.message.reply_text("❌ Platform harus Tokopedia atau Shopee")
             return
         
-        # Validasi harga
         if target_price <= 0:
             await update.message.reply_text("❌ Harga harus lebih dari 0")
             return
         
-        # Cek harga saat ini
         await update.message.reply_text("⏳ Sedang cek harga produk...")
         current_price = get_current_price(platform, url)
         
@@ -226,10 +150,8 @@ async def add_product(update, context):
             )
             return
         
-        # Ekstrak nama produk dari URL atau buat default
         product_name = url.split('/')[-1][:50]
         
-        # Tambah ke list
         products = load_products()
         new_product = {
             'id': len(products) + 1,
@@ -244,7 +166,6 @@ async def add_product(update, context):
         products.append(new_product)
         save_products(products)
         
-        # Konfirmasi
         current_formatted = f"Rp{current_price:,.0f}".replace(',', '.')
         target_formatted = f"Rp{target_price:,.0f}".replace(',', '.')
         
@@ -266,7 +187,7 @@ Bot akan cek harga setiap jam. Anda akan mendapat notifikasi jika harga mencapai
         logger.error(f"Error adding product: {e}")
         await update.message.reply_text(f"❌ Terjadi kesalahan: {str(e)}")
 
-async def list_products(update, context):
+async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Perintah /list_products"""
     products = load_products()
     
@@ -296,7 +217,7 @@ async def list_products(update, context):
     message += "\n<i>Gunakan /remove_product [nomor] untuk menghapus</i>"
     await update.message.reply_text(message, parse_mode='HTML')
 
-async def remove_product(update, context):
+async def remove_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Perintah /remove_product"""
     try:
         if not context.args:
@@ -310,7 +231,6 @@ async def remove_product(update, context):
         product_id = int(context.args[0])
         products = load_products()
         
-        # Cari dan hapus
         products = [p for p in products if p['id'] != product_id]
         save_products(products)
         
@@ -322,11 +242,57 @@ async def remove_product(update, context):
         logger.error(f"Error removing product: {e}")
         await update.message.reply_text(f"❌ Terjadi kesalahan: {str(e)}")
 
-async def check_now(update, context):
+async def check_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Perintah /check_now"""
     await update.message.reply_text("⏳ Sedang cek harga semua produk...")
     await check_prices(context)
-    await update.message.reply_text("✅ Pengecekan selesai. Lihat /list_products untuk detail.")
+    await update.message.reply_text("✅ Pengecekan selesai.")
+
+async def send_notification(app: Application, message: str):
+    """Kirim notifikasi ke Telegram"""
+    try:
+        await app.bot.send_message(chat_id=CHAT_ID, text=message, parse_mode='HTML')
+    except Exception as e:
+        logger.error(f"Error sending notification: {e}")
+
+async def check_prices(context: ContextTypes.DEFAULT_TYPE):
+    """Fungsi untuk cek harga secara berkala"""
+    products = load_products()
+    app = context.application
+    
+    for i, product in enumerate(products):
+        try:
+            current_price = get_current_price(product['platform'], product['url'])
+            
+            if current_price is None:
+                logger.warning(f"Could not get price for product {i+1}")
+                continue
+            
+            product['current_price'] = current_price
+            product['last_checked'] = datetime.now().isoformat()
+            
+            if current_price <= product['target_price']:
+                price_formatted = f"Rp{current_price:,.0f}".replace(',', '.')
+                target_formatted = f"Rp{product['target_price']:,.0f}".replace(',', '.')
+                
+                message = f"""
+🎉 <b>HARGA TARGET TERCAPAI!</b>
+
+📦 Produk: {product['name']}
+🏪 Platform: {product['platform']}
+💰 Harga Sekarang: <b>{price_formatted}</b>
+🎯 Target Harga: {target_formatted}
+
+<a href="{product['url']}">Beli Sekarang</a>
+"""
+                await send_notification(app, message)
+            
+            save_products(products)
+            
+        except Exception as e:
+            logger.error(f"Error checking product {i+1}: {e}")
+        
+        time.sleep(1)
 
 async def main():
     """Jalankan bot"""
@@ -343,12 +309,16 @@ async def main():
     
     # Set job untuk cek harga setiap jam
     job_queue = application.job_queue
-    job_queue.run_repeating(check_prices, interval=3600, first=0)  # 3600 detik = 1 jam
+    job_queue.run_repeating(check_prices, interval=3600, first=60)
     
-    logger.info("Bot started!")
+    logger.info("Bot started successfully!")
     
     # Start polling
-    await application.run_polling()
+    async with application:
+        await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        await application.start()
+        logger.info("Bot is running and polling for updates...")
+        await application.updater.stop()
 
 if __name__ == '__main__':
     import asyncio
